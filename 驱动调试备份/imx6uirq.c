@@ -18,21 +18,23 @@
 #include <asm/mach/map.h>
 #include <asm/uaccess.h>
 #include <asm/io.h>
+#include  <linux/string.h>
 /***************************************************************
 Copyright © ALIENTEK Co., Ltd. 1998-2029. All rights reserved.
 文件名		: imx6uirq.c
-作者	  	: 左忠凯
+作者	  	: zhaochangjian
 版本	   	: V1.0
 描述	   	: Linux中断驱动实验
 其他	   	: 无
-论坛 	   	: www.openedv.com
-日志	   	: 初版V1.0 2019/7/26 左忠凯创建
+
 ***************************************************************/
 #define IMX6UIRQ_CNT		1			/* 设备号个数 	*/
 #define IMX6UIRQ_NAME		"imx6uirq"	/* 名字 		*/
 #define KEY0VALUE			0X01		/* KEY0按键值 	*/
 #define INVAKEY				0XFF		/* 无效的按键值 */
 #define KEY_NUM				9			/* 按键数量 	*/
+#define KEY_Time_Long 1000
+#define KEY_Time_Double 300
 
 /* 中断IO描述结构体 */
 struct irq_keydesc {
@@ -41,6 +43,7 @@ struct irq_keydesc {
 	int gpio;								/* gpio */
 	unsigned char value;					/* 按键对应的键值 */
 	irqreturn_t (*handler)(int, void *);	/* 中断服务函数 */
+	uint8_t count;
 };
 
 /* imx6uirq设备结构体 */
@@ -53,12 +56,32 @@ struct imx6uirq_dev{
 	int minor;				/* 次设备号   */
 	struct device_node	*nd; /* 设备节点 */
 	struct timer_list timer;/* 定义一个定时器*/
+	struct timer_list timer_click;
 	struct irq_keydesc irqkeydesc[KEY_NUM];	/* 按键描述数组 */
     unsigned long timeout; 
 };
 
 struct imx6uirq_dev imx6uirq;	/* irq设备 */
 
+void Click(unsigned long arg){
+	struct irq_keydesc *keydesc =  (struct irq_keydesc *)arg;
+	printk("%sshort_pressd!!!\r\n",keydesc->name);
+}
+
+void Double_Click(unsigned long arg){
+	struct irq_keydesc *keydesc =  (struct irq_keydesc *)arg;
+	printk("%sDouble_pressd!!!\r\n",keydesc->name);
+}
+
+void Long_Click(unsigned long arg){
+	struct irq_keydesc *keydesc =  (struct irq_keydesc *)arg;
+	printk("%sLong_pressd!!!\r\n",keydesc->name);
+}
+
+void Release(unsigned long arg){
+	struct irq_keydesc *keydesc =  (struct irq_keydesc *)arg;
+	printk("%sRelease!!!\r\n",keydesc->name);
+}
 /* @description		: 中断服务函数，开启定时器，延时10ms，
  *				  	  定时器用于按键消抖。
  * @param - irq 	: 中断号 
@@ -68,33 +91,62 @@ struct imx6uirq_dev imx6uirq;	/* irq设备 */
 static irqreturn_t key_handler(int irq, void *dev_id)
 {
 	imx6uirq.timer.data = (volatile long)dev_id;
-	imx6uirq.timeout= jiffies + msecs_to_jiffies(2000) ;// 2秒钟后超时
+	imx6uirq.timeout= jiffies + msecs_to_jiffies(KEY_Time_Long) ;// 2秒钟后超时
 	mod_timer(&imx6uirq.timer, jiffies + msecs_to_jiffies(10));	/* 10ms定时 */
 	return IRQ_RETVAL(IRQ_HANDLED);
 }
-
+/*description:key exe*/
+void timer_click_function(unsigned long arg)
+{
+	struct irq_keydesc *keydesc =  (struct irq_keydesc *)arg;
+	if(keydesc->count < 2)
+	{
+		Click(arg);
+	}
+	else
+	{
+		Double_Click(arg);
+	}
+	printk("%scount=%d\r\n",keydesc->name,keydesc->count);
+	keydesc->count=0;
+}
 /* @description	: 定时器服务函数，用于按键消抖，定时器到了以后
  *				  再次读取按键值，如果按键还是处于按下状态就表示按键有效。
  * @param - arg	: 设备结构变量
  * @return 		: 无
  */
+uint8_t Flag_Long = 0;
 void timer_function(unsigned long arg)
 {
 	unsigned char value;
 	struct irq_keydesc *keydesc =  (struct irq_keydesc *)arg;
-	
+
 	value = gpio_get_value(keydesc->gpio); 	/* 读取IO值 */
 	if(value == 0){ 						/* 按下按键 */
-		mod_timer(&imx6uirq.timer, jiffies + msecs_to_jiffies(200));	/* 10ms定时 */
+		mod_timer(&imx6uirq.timer, jiffies + msecs_to_jiffies(200));	
 		if(time_before(jiffies, imx6uirq.timeout)){
-			printk("%sshort_pressd!!!\r\n",keydesc->name);
+			if(strcmp(keydesc->name, "KEY4")!=0)
+			{
+				Click(arg);
+			}
 		}
 		else{			
-			printk("%slong_pressd!!!\r\n",keydesc->name);
+			Long_Click(arg);
+			Flag_Long = 1;
 		}
 	}
 	else{ 									/* 按键松开 */	
-		printk("%sreleased!!!\r\n",keydesc->name);	
+		if(!strcmp(keydesc->name, "KEY4")&&(Flag_Long == 0))//KEY4   have fuction click  double_click  long_click
+		{
+			imx6uirq.timer_click.data = arg;
+			keydesc->count++;
+			mod_timer(&imx6uirq.timer_click, jiffies+msecs_to_jiffies(KEY_Time_Double));
+		}
+		else
+		{
+			Release(arg);
+			Flag_Long = 0;
+		}
 	}	
 }
 
@@ -150,7 +202,9 @@ static int keyio_init(void)
 
 	/* 创建定时器 */
 	init_timer(&imx6uirq.timer);
+	init_timer(&imx6uirq.timer_click);
 	imx6uirq.timer.function = timer_function;
+	imx6uirq.timer_click.function = timer_click_function;
 	return 0;
 }
 
@@ -236,7 +290,7 @@ static void __exit imx6uirq_exit(void)
 	unsigned int i = 0;
 	/* 删除定时器 */
 	del_timer_sync(&imx6uirq.timer);	/* 删除定时器 */
-		
+	del_timer_sync(&imx6uirq.timer_click);	/* 删除定时器 */	
 	/* 释放中断 */
 	for (i = 0; i < KEY_NUM; i++) {
 		free_irq(imx6uirq.irqkeydesc[i].irqnum, &imx6uirq.irqkeydesc[i]);
